@@ -261,7 +261,7 @@ function Assistant() {
     rec.onresult = (e) => {
       let interimText = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
+        const r = e.results[i]!;
         if (r.isFinal) finalText += r[0].transcript;
         else interimText += r[0].transcript;
       }
@@ -489,7 +489,7 @@ function Assistant() {
             </label>
             <div className="flex flex-col gap-3">
               <span className="text-muted-foreground">Speaking speed · {settings.rate.toFixed(1)}×</span>
-              <Slider min={0.6} max={1.6} step={0.1} value={[settings.rate]} onValueChange={([v]) => updateSettings({ rate: v })} />
+              <Slider min={0.6} max={1.6} step={0.1} value={[settings.rate]} onValueChange={([v]) => updateSettings({ rate: v ?? 1 })} />
             </div>
             <button
               className="mt-2 rounded-lg border border-border px-3 py-2 text-left hover:bg-muted"
