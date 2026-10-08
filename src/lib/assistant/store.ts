@@ -55,6 +55,10 @@ export function saveConversations(list: Conversation[]) {
   }
 }
 
+export function persistConversationHistory(list: Conversation[], enabled: boolean) {
+  saveConversations(enabled ? list : []);
+}
+
 export function loadSettings(): Settings {
   try {
     return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SK) || "{}") };
