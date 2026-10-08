@@ -44,9 +44,11 @@ export class Speaker {
   push(chunk: string) {
     this.pending += chunk;
     const m = this.pending.match(/^([\s\S]*?[.!?…])(\s+|$)([\s\S]*)$/);
-    if (m && m[1].trim().length > 1 && m[2]) {
-      this.say(m[1]);
-      this.pending = m[3];
+    const sentence = m?.[1];
+    const remainder = m?.[3];
+    if (sentence && sentence.trim().length > 1 && m?.[2] && remainder !== undefined) {
+      this.say(sentence);
+      this.pending = remainder;
       this.push("");
     }
   }

@@ -7,6 +7,7 @@ export type Settings = {
   voiceURI: string;
   rate: number;
   handsFree: boolean;
+  saveHistory: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -16,6 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceURI: "",
   rate: 1,
   handsFree: false,
+  saveHistory: true,
 };
 
 const CK = "echo.conversations.v1";
@@ -25,7 +27,17 @@ export const uid = () => Math.random().toString(36).slice(2) + Date.now().toStri
 
 export function loadConversations(): Conversation[] {
   try {
-    return JSON.parse(localStorage.getItem(CK) || "[]");
+    const parsed: unknown = JSON.parse(localStorage.getItem(CK) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (value): value is Conversation =>
+        typeof value === "object" &&
+        value !== null &&
+        typeof (value as Conversation).id === "string" &&
+        typeof (value as Conversation).title === "string" &&
+        typeof (value as Conversation).updatedAt === "number" &&
+        Array.isArray((value as Conversation).messages),
+    );
   } catch {
     return [];
   }
@@ -43,6 +55,10 @@ export function saveConversations(list: Conversation[]) {
   }
 }
 
+export function persistConversationHistory(list: Conversation[], enabled: boolean) {
+  saveConversations(enabled ? list : []);
+}
+
 export function loadSettings(): Settings {
   try {
     return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SK) || "{}") };
@@ -52,5 +68,9 @@ export function loadSettings(): Settings {
 }
 
 export function saveSettings(s: Settings) {
-  localStorage.setItem(SK, JSON.stringify(s));
+  try {
+    localStorage.setItem(SK, JSON.stringify(s));
+  } catch {
+    /* storage may be unavailable */
+  }
 }

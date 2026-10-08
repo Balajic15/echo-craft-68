@@ -12,7 +12,8 @@ import {
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
-import { detectVisualIntent, type VisualSource } from "@/lib/assistant/intent";
+import { Button } from "@/components/ui/button";
+import { detectVisualIntent, isVisualFollowUp, type VisualSource } from "@/lib/assistant/intent";
 import { getRecognition, Speaker } from "@/lib/assistant/speech";
 import {
   type Conversation,
@@ -21,6 +22,7 @@ import {
   DEFAULT_SETTINGS,
   loadConversations,
   loadSettings,
+  persistConversationHistory,
   saveConversations,
   saveSettings,
   uid,
@@ -50,6 +52,7 @@ function Assistant() {
   const [interim, setInterim] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [vision, setVision] = useState<VisualSource>(null);
+  const [pendingScreen, setPendingScreen] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -97,6 +100,18 @@ function Assistant() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [current.messages, interim]);
 
+  useEffect(() => {
+    const stopOnHide = () => {
+      if (document.visibilityState !== "visible") {
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        setVision(null);
+      }
+    };
+    document.addEventListener("visibilitychange", stopOnHide);
+    return () => document.removeEventListener("visibilitychange", stopOnHide);
+  }, []);
+
   // ---------- Vision ----------
   const stopVision = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -114,14 +129,20 @@ function Assistant() {
             ? await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 } } })
             : await navigator.mediaDevices.getDisplayMedia({ video: true });
         streamRef.current = stream;
-        stream.getVideoTracks()[0].onended = () => stopVision();
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack) {
+          stream.getTracks().forEach((track) => track.stop());
+          return false;
+        }
+        videoTrack.onended = () => stopVision();
         setVision(source);
         await new Promise((r) => setTimeout(r, 50));
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
           await new Promise<void>((resolve) => {
-            const v = videoRef.current!;
+            const v = videoRef.current;
+            if (!v) return resolve();
             if (v.videoWidth) return resolve();
             v.onloadeddata = () => resolve();
             setTimeout(resolve, 1500);
@@ -145,7 +166,9 @@ function Assistant() {
     const c = document.createElement("canvas");
     c.width = Math.round(v.videoWidth * scale);
     c.height = Math.round(v.videoHeight * scale);
-    c.getContext("2d")!.drawImage(v, 0, 0, c.width, c.height);
+    const context = c.getContext("2d");
+    if (!context) return;
+    context.drawImage(v, 0, 0, c.width, c.height);
     return c.toDataURL("image/jpeg", 0.8);
   };
 
@@ -153,7 +176,7 @@ function Assistant() {
   const persist = (conv: Conversation) => {
     setConvos((prev) => {
       const next = [conv, ...prev.filter((c) => c.id !== conv.id)].sort((a, b) => b.updatedAt - a.updatedAt);
-      saveConversations(next);
+      persistConversationHistory(next, settings.saveHistory);
       return next;
     });
   };
@@ -165,7 +188,7 @@ function Assistant() {
     setPhase("idle");
   };
 
-  const send = async (raw: string) => {
+  const send = async (raw: string, forcedSource?: VisualSource) => {
     const text = raw.trim();
     if (!text) return;
     interrupt();
@@ -176,16 +199,29 @@ function Assistant() {
     let image: string | undefined;
     let source: VisualSource = null;
     if (s.autoVision) {
-      const intent = detectVisualIntent(text, v);
+      const intent = forcedSource ?? detectVisualIntent(text, v);
+      if (intent === "screen" && !streamRef.current) {
+        if (!isVisualFollowUp(text)) stopVision();
+        setPendingScreen(text);
+        setInterim("");
+        return;
+      }
+      setPendingScreen("");
       if (intent === "stop" || intent === null) {
-        if (v) stopVision();
+        if (v && !isVisualFollowUp(text)) stopVision();
       } else if (await startVision(intent)) {
         image = captureFrame();
         source = intent;
       }
     }
 
-    const userMsg: Msg = { id: uid(), role: "user", text, image, source: source ?? undefined };
+    const userMsg: Msg = {
+      id: uid(),
+      role: "user",
+      text,
+      ...(image ? { image } : {}),
+      ...(source ? { source } : {}),
+    };
     const asstMsg: Msg = { id: uid(), role: "assistant", text: "" };
     const base = stateRef.current.current;
     let conv: Conversation = {
@@ -199,7 +235,11 @@ function Assistant() {
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    const speaker = speakerRef.current!;
+    const speaker = speakerRef.current;
+    if (!speaker) {
+      setPhase("idle");
+      return;
+    }
     let full = "";
     try {
       const history = conv.messages.slice(0, -1).slice(-20);
@@ -261,9 +301,10 @@ function Assistant() {
     rec.onresult = (e) => {
       let interimText = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i]!;
-        if (r.isFinal) finalText += r[0].transcript;
-        else interimText += r[0].transcript;
+        const result = e.results[i];
+        const transcript = result?.[0]?.transcript ?? "";
+        if (result?.isFinal) finalText += transcript;
+        else interimText += transcript;
       }
       setInterim(finalText + interimText);
     };
@@ -291,6 +332,7 @@ function Assistant() {
   const newChat = () => {
     interrupt();
     stopVision();
+    setPendingScreen("");
     setCurrent({ id: uid(), title: "", updatedAt: 0, messages: [] });
   };
 
@@ -298,6 +340,10 @@ function Assistant() {
     setSettings((s) => {
       const n = { ...s, ...patch };
       saveSettings(n);
+      if (patch.saveHistory === false) {
+        setConvos([]);
+        saveConversations([]);
+      }
       return n;
     });
   };
@@ -332,9 +378,28 @@ function Assistant() {
             <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
             {vision === "camera" ? "Camera" : "Screen"}
           </div>
-          <button aria-label="Close" onClick={stopVision} className="absolute right-3 top-3 rounded-full bg-background/90 p-1.5">
+          <Button type="button" variant="secondary" size="icon" aria-label="Stop visual sharing" title="Stop visual sharing" onClick={stopVision} className="absolute right-3 top-3 h-8 w-8 rounded-full bg-background/90">
             <X className="h-4 w-4" />
-          </button>
+          </Button>
+        </div>
+      )}
+
+      {pendingScreen && (
+        <div className="mx-auto mb-2 flex w-[calc(100%-2.5rem)] max-w-2xl items-center justify-between gap-3 rounded-xl border border-border px-4 py-3 text-sm">
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">Share your screen to continue</span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={async () => {
+              const question = pendingScreen;
+              const opened = await startVision("screen");
+              if (opened) await send(question, "screen");
+              else setPendingScreen("");
+            }}
+          >
+            Share
+          </Button>
         </div>
       )}
 
@@ -351,17 +416,17 @@ function Assistant() {
               m.role === "user" ? (
                 <div key={m.id} className="flex flex-col items-end gap-1.5">
                   {m.image && <img src={m.image} alt="" className="w-28 rounded-lg border border-border" />}
-                  <div className="max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 text-[15px] leading-relaxed">{m.text}</div>
+                  <div className="max-w-[92%] text-right text-[15px] leading-relaxed">{m.text}</div>
                 </div>
               ) : (
                 <div key={m.id} className="max-w-[92%] whitespace-pre-wrap text-[15px] leading-relaxed">
-                  {m.text || <span className="inline-flex gap-1 py-2"><Dot /><Dot d={150} /><Dot d={300} /></span>}
+                  {m.text || <span className="text-muted-foreground">Thinking</span>}
                 </div>
               ),
             )}
             {interim && (
               <div className="flex justify-end">
-                <div className="max-w-[85%] rounded-2xl border border-dashed border-border px-4 py-2.5 text-[15px] text-muted-foreground">{interim}</div>
+                <div className="max-w-[92%] text-right text-[15px] text-muted-foreground">{interim}</div>
               </div>
             )}
           </div>
@@ -390,24 +455,24 @@ function Assistant() {
               className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-muted-foreground"
             />
             {input.trim() ? (
-              <button type="submit" aria-label="Send" className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground">
+              <Button type="submit" aria-label="Send" size="icon" className="h-10 w-10 rounded-full">
                 <ArrowUp className="h-5 w-5" />
-              </button>
+              </Button>
             ) : phase === "thinking" || phase === "speaking" ? (
-              <button type="button" onClick={interrupt} aria-label="Stop" className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground">
+              <Button type="button" onClick={interrupt} aria-label="Stop" size="icon" className="h-10 w-10 rounded-full">
                 <Square className="h-4 w-4 fill-current" />
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 type="button"
                 onClick={onMic}
                 aria-label={phase === "listening" ? "Stop listening" : "Speak"}
-                className={`flex h-10 w-10 items-center justify-center rounded-full transition-colors ${
-                  phase === "listening" ? "bg-primary text-primary-foreground animate-pulse" : "bg-muted text-foreground hover:bg-accent"
-                }`}
+                variant={phase === "listening" ? "default" : "secondary"}
+                size="icon"
+                className={`h-10 w-10 rounded-full ${phase === "listening" ? "animate-pulse" : ""}`}
               >
                 <Mic className="h-5 w-5" />
-              </button>
+              </Button>
             )}
           </form>
         </div>
@@ -468,11 +533,14 @@ function Assistant() {
             <Row label="Speak replies" hint="Read answers out loud">
               <Switch checked={settings.speak} onCheckedChange={(v) => updateSettings({ speak: v })} />
             </Row>
-            <Row label="Hands-free" hint="Keep listening after each reply">
+            <Row label="Hands-free" hint="Listen again after each reply">
               <Switch checked={settings.handsFree} onCheckedChange={(v) => updateSettings({ handsFree: v })} />
             </Row>
             <Row label="Automatic camera" hint="Open camera or screen when you ask about something visual">
               <Switch checked={settings.autoVision} onCheckedChange={(v) => updateSettings({ autoVision: v })} />
+            </Row>
+            <Row label="Save history" hint="Keep conversations on this device">
+              <Switch checked={settings.saveHistory} onCheckedChange={(v) => updateSettings({ saveHistory: v })} />
             </Row>
             <label className="flex flex-col gap-2">
               <span className="text-muted-foreground">Voice</span>
@@ -491,8 +559,10 @@ function Assistant() {
               <span className="text-muted-foreground">Speaking speed · {settings.rate.toFixed(1)}×</span>
               <Slider min={0.6} max={1.6} step={0.1} value={[settings.rate]} onValueChange={([v]) => updateSettings({ rate: v ?? 1 })} />
             </div>
-            <button
-              className="mt-2 rounded-lg border border-border px-3 py-2 text-left hover:bg-muted"
+              <Button
+              type="button"
+              variant="outline"
+              className="mt-2 justify-start"
               onClick={() => {
                 setConvos([]);
                 saveConversations([]);
@@ -501,7 +571,7 @@ function Assistant() {
               }}
             >
               Clear history
-            </button>
+            </Button>
           </div>
         </SheetContent>
       </Sheet>

@@ -23,6 +23,10 @@ export const Route = createFileRoute("/api/chat")({
   server: {
     handlers: {
       POST: async ({ request }) => {
+        const origin = request.headers.get("origin");
+        if (origin && origin !== new URL(request.url).origin) {
+          return Response.json({ error: "Request not allowed." }, { status: 403 });
+        }
         const key = process.env["GOOGLE_API_KEY"];
         if (!key) return Response.json({ error: "Assistant is not configured." }, { status: 500 });
 
@@ -107,7 +111,11 @@ export const Route = createFileRoute("/api/chat")({
         });
 
         return new Response(stream, {
-          headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+          },
         });
       },
     },
